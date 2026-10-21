@@ -79,7 +79,7 @@ fun ImageCompressorScreen(
                 Column(
                     horizontalAlignment = Alignment.End,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(bottom = 80.dp) // Space above NavBar
+                    modifier = Modifier.padding(bottom = 100.dp) // Space above NavBar
                 ) {
                     // Add More Button
                     if (!showResults && images.isNotEmpty() && images.size < 10) {

@@ -8,6 +8,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.lumora.compresso.model.SwipeAction
+import com.lumora.compresso.model.ThemeMode
 import com.lumora.compresso.viewmodel.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -15,6 +16,7 @@ import com.lumora.compresso.viewmodel.SettingsViewModel
 fun SettingsScreen(settingsViewModel: SettingsViewModel) {
     val leftAction by settingsViewModel.swipeLeftAction.collectAsState()
     val rightAction by settingsViewModel.swipeRightAction.collectAsState()
+    val themeMode by settingsViewModel.themeMode.collectAsState()
 
     Scaffold(
         topBar = {
@@ -33,21 +35,47 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            // APPEARANCE SECTION
+            Text("Appearance", style = MaterialTheme.typography.titleMedium)
+
+            SettingsDropdown(
+                label = "App Theme",
+                currentValue = themeMode.label,
+                options = ThemeMode.entries.map { it.label },
+                onValueSelected = { selectedLabel ->
+                    val selectedMode = ThemeMode.entries.find { it.label == selectedLabel }
+                    if (selectedMode != null) settingsViewModel.updateThemeMode(selectedMode)
+                }
+            )
+
+            Spacer(Modifier.height(8.dp))
+
+            // GESTURES SECTION
             Text("Gestures", style = MaterialTheme.typography.titleMedium)
 
-            SwipeActionDropdown(
+            SettingsDropdown(
                 label = "Swipe Left Action",
-                currentAction = leftAction,
-                onActionSelected = { settingsViewModel.updateSwipeLeft(it) }
+                currentValue = leftAction.name,
+                options = SwipeAction.entries.map { it.name },
+                onValueSelected = { selectedName ->
+                    val selectedAction = SwipeAction.entries.find { it.name == selectedName }
+                    if (selectedAction != null) settingsViewModel.updateSwipeLeft(selectedAction)
+                }
             )
 
-            SwipeActionDropdown(
+            SettingsDropdown(
                 label = "Swipe Right Action",
-                currentAction = rightAction,
-                onActionSelected = { settingsViewModel.updateSwipeRight(it) }
+                currentValue = rightAction.name,
+                options = SwipeAction.entries.map { it.name },
+                onValueSelected = { selectedName ->
+                    val selectedAction = SwipeAction.entries.find { it.name == selectedName }
+                    if (selectedAction != null) settingsViewModel.updateSwipeRight(selectedAction)
+                }
             )
 
-            Spacer(Modifier.height(16.dp))
+            Spacer(Modifier.height(8.dp))
+
+            // DEFAULTS SECTION
             Text("Defaults", style = MaterialTheme.typography.titleMedium)
 
             SettingsRow("Default save folder", "Not set")
@@ -59,10 +87,11 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun SwipeActionDropdown(
+fun SettingsDropdown(
     label: String,
-    currentAction: SwipeAction,
-    onActionSelected: (SwipeAction) -> Unit
+    currentValue: String,
+    options: List<String>,
+    onValueSelected: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
 
@@ -71,7 +100,7 @@ fun SwipeActionDropdown(
         onExpandedChange = { expanded = it }
     ) {
         OutlinedTextField(
-            value = currentAction.name,
+            value = currentValue,
             onValueChange = {},
             readOnly = true,
             label = { Text(label) },
@@ -84,11 +113,11 @@ fun SwipeActionDropdown(
             expanded = expanded,
             onDismissRequest = { expanded = false }
         ) {
-            SwipeAction.entries.forEach { action ->
+            options.forEach { option ->
                 DropdownMenuItem(
-                    text = { Text(action.name) },
+                    text = { Text(option) },
                     onClick = {
-                        onActionSelected(action)
+                        onValueSelected(option)
                         expanded = false
                     }
                 )
@@ -101,7 +130,9 @@ fun SwipeActionDropdown(
 private fun SettingsRow(title: String, value: String) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             Text(title)

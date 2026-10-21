@@ -34,8 +34,7 @@ enum class Section(val label: String, val icon: ImageVector) {
 }
 
 @Composable
-fun CompressoApp() {
-    val settingsViewModel: SettingsViewModel = viewModel()
+fun CompressoApp(settingsViewModel: SettingsViewModel) {
     val pagerState = rememberPagerState(pageCount = { Section.entries.size })
     val scope = rememberCoroutineScope()
 
