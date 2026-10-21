@@ -7,9 +7,9 @@ data class SelectedImage(
     val name: String,
     val sizeBytes: Long,
     val width: Int,
-    val height: Int
+    val height: Int,
+    val mimeType: String? = null
 ) {
-    // Helper to format bytes into KB or MB for the UI
     fun getFormattedSize(): String {
         return when {
             sizeBytes >= 1024 * 1024 -> String.format("%.2f MB", sizeBytes / (1024.0 * 1024.0))

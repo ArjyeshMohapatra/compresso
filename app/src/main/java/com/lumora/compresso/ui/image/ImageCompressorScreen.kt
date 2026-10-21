@@ -1,152 +1,111 @@
 package com.lumora.compresso.ui.image
 
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.PickVisualMediaRequest
-import androidx.activity.result.contract.ActivityResultContracts
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
 import com.lumora.compresso.viewmodel.ImageViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ImageCompressorScreen(viewModel: ImageViewModel = viewModel()) {
     val context = LocalContext.current
-    val images by viewModel.selectedImages.collectAsState()
 
-    // The Android System Photo Picker
-    val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
-    ) { uris ->
-        if (uris.isNotEmpty()) {
-            viewModel.addImages(context, uris)
+    var showResults by rememberSaveable { mutableStateOf(false) }
+    // Tracks if we are waiting for the current processing task to finish
+    var waitForResults by rememberSaveable { mutableStateOf(false) }
+
+    val isProcessing by viewModel.isProcessing.collectAsState()
+    val images by viewModel.selectedImages.collectAsState()
+    val results by viewModel.results.collectAsState()
+
+    // Watch for processing to finish, then swap screens
+    LaunchedEffect(isProcessing, waitForResults) {
+        if (waitForResults && !isProcessing) {
+            waitForResults = false
+            showResults = true
         }
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        if (images.isEmpty()) {
-            // Empty State
-            Column(
-                modifier = Modifier.fillMaxSize().padding(24.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Image,
-                    contentDescription = null,
-                    modifier = Modifier.size(72.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
-                Spacer(Modifier.height(16.dp))
-                Text("No images selected", style = MaterialTheme.typography.titleMedium)
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Select one or more images to compress.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(24.dp))
-                Button(
-                    onClick = {
-                        photoPickerLauncher.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                        )
+    BackHandler(enabled = showResults) {
+        showResults = false
+    }
+
+    Scaffold(
+        topBar = {
+            CenterAlignedTopAppBar(
+                title = {
+                    Text(if (showResults) "Compression Results" else "Image Compressor")
+                },
+                navigationIcon = {
+                    if (showResults) {
+                        IconButton(onClick = { showResults = false }) {
+                            Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                        }
                     }
+                },
+                windowInsets = WindowInsets(0, 0, 0, 0)
+            )
+        },
+        floatingActionButton = {
+            if (!isProcessing) {
+                if (showResults && results.isNotEmpty()) {
+                    FloatingActionButton(onClick = { /* Phase 5: Preview */ }) {
+                        Text("Preview", modifier = Modifier.padding(horizontal = 16.dp))
+                    }
+                } else if (!showResults && images.isNotEmpty()) {
+                    FloatingActionButton(
+                        onClick = {
+                            // 1. Set wait flag
+                            waitForResults = true
+                            // 2. Start processing (which immediately sets isProcessing = true)
+                            viewModel.compressImages(context)
+                        },
+                        containerColor = MaterialTheme.colorScheme.primary,
+                        contentColor = MaterialTheme.colorScheme.onPrimary
+                    ) {
+                        Text("Compress", modifier = Modifier.padding(horizontal = 16.dp))
+                    }
+                }
+            }
+        }
+    ) { paddingValues ->
+        Box(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+            if (showResults) {
+                ImageResultsScreen(viewModel)
+            } else {
+                ImageConfigScreen(viewModel)
+            }
+
+            // Global Processing Modal
+            if (isProcessing) {
+                Dialog(
+                    onDismissRequest = { },
+                    properties = DialogProperties(dismissOnBackPress = false, dismissOnClickOutside = false)
                 ) {
-                    Text("Select Images")
-                }
-            }
-        } else {
-            // List State
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(16.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text("${images.size} image(s) selected", style = MaterialTheme.typography.titleMedium)
-                TextButton(onClick = { viewModel.clearAll() }) {
-                    Text("Clear All", color = MaterialTheme.colorScheme.error)
-                }
-            }
-
-            LazyColumn(
-                modifier = Modifier.weight(1f),
-                contentPadding = PaddingValues(16.dp),
-                verticalArrangement = Arrangement.spacedBy(12.dp)
-            ) {
-                items(images, key = { it.uri.toString() }) { image ->
-                    Card(modifier = Modifier.fillMaxWidth()) {
-                        Row(
-                            modifier = Modifier.padding(12.dp),
-                            verticalAlignment = Alignment.CenterVertically
+                    Card {
+                        Column(
+                            modifier = Modifier.padding(32.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            // Coil automatically handles EXIF rotation for the thumbnail
-                            AsyncImage(
-                                model = image.uri,
-                                contentDescription = image.name,
-                                modifier = Modifier
-                                    .size(64.dp)
-                                    .padding(end = 12.dp),
-                                contentScale = ContentScale.Crop
-                            )
-
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = image.name,
-                                    style = MaterialTheme.typography.bodyLarge,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = "${image.width} × ${image.height} px  •  ${image.getFormattedSize()}",
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-
-                            IconButton(onClick = { viewModel.removeImage(image.uri) }) {
-                                Icon(
-                                    imageVector = Icons.Default.Close,
-                                    contentDescription = "Remove",
-                                    tint = MaterialTheme.colorScheme.error
-                                )
-                            }
+                            CircularProgressIndicator(modifier = Modifier.size(48.dp))
+                            Spacer(Modifier.height(16.dp))
+                            Text("Compressing Images...", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(4.dp))
+                            Text("Please wait", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     }
                 }
-            }
-
-            // Add more button at the bottom
-            Button(
-                onClick = {
-                    photoPickerLauncher.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                    )
-                },
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(16.dp)
-            ) {
-                Icon(Icons.Default.Add, contentDescription = null)
-                Spacer(Modifier.width(8.dp))
-                Text("Add More Images")
             }
         }
     }
