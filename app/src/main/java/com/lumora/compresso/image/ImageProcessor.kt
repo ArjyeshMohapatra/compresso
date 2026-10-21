@@ -7,6 +7,7 @@ import android.graphics.Matrix
 import android.os.Build
 import androidx.exifinterface.media.ExifInterface
 import com.lumora.compresso.model.*
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
@@ -26,38 +27,40 @@ object ImageProcessor {
             if (settings.resizeEnabled) {
                 require(settings.targetWidth > 0 && settings.targetHeight > 0) { "Target width and height must be positive" }
             }
+            if (settings.compressionMode == CompressionMode.TARGET_SIZE) {
+                require(settings.targetSizeKb > 0) { "Target size must be greater than zero" }
+            }
 
             val resolver = context.contentResolver
+            val requestedMaxBytes = settings.targetSizeKb * 1024L
 
-            // 1. STRICT SKIP CHECK (Format + Size)
             val isSameFormat = when (settings.outputFormat) {
                 ImageOutputFormat.JPEG -> image.mimeType == "image/jpeg"
                 ImageOutputFormat.PNG -> image.mimeType == "image/png"
                 ImageOutputFormat.WEBP -> image.mimeType == "image/webp"
             }
 
+            // ROBUST SKIP CHECK
             if (settings.compressionMode == CompressionMode.TARGET_SIZE &&
-                (settings.targetSizeKb * 1024L) >= image.sizeBytes &&
-                !settings.resizeEnabled &&
-                isSameFormat &&
-                image.sizeBytes > 0) {
+                !settings.resizeEnabled && isSameFormat) {
 
                 val originalBytes = resolver.openInputStream(image.uri)?.use { it.readBytes() }
                     ?: throw IOException("Cannot read original image")
 
-                return@withContext Result.success(
-                    ProcessingResult(
-                        originalImage = image,
-                        compressedSizeBytes = originalBytes.size.toLong(),
-                        compressedWidth = image.width,
-                        compressedHeight = image.height,
-                        processedBytes = originalBytes,
-                        status = ProcessingStatus.SKIPPED
+                if (originalBytes.size.toLong() <= requestedMaxBytes) {
+                    return@withContext Result.success(
+                        ProcessingResult(
+                            originalImage = image,
+                            compressedSizeBytes = originalBytes.size.toLong(),
+                            compressedWidth = image.width,
+                            compressedHeight = image.height,
+                            processedBytes = originalBytes,
+                            status = ProcessingStatus.SKIPPED
+                        )
                     )
-                )
+                }
             }
 
-            // 2. Decode and Fix EXIF
             val orientation = resolver.openInputStream(image.uri)?.use { stream ->
                 ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
             } ?: throw IOException("Cannot read image orientation")
@@ -83,12 +86,15 @@ object ImageProcessor {
                     if (orientedBitmap !== bitmap) { bitmap.recycle(); bitmap = orientedBitmap }
                 }
 
-                // 3. Resize
+                // Bounding Box Resize (Never upscale)
                 if (settings.resizeEnabled) {
                     var targetWidth = settings.targetWidth
                     var targetHeight = settings.targetHeight
                     if (settings.preserveAspectRatio) {
-                        val scale = min(settings.targetWidth.toFloat() / bitmap.width, settings.targetHeight.toFloat() / bitmap.height)
+                        val scale = min(
+                            1f, // Prevents upscaling
+                            min(settings.targetWidth.toFloat() / bitmap.width, settings.targetHeight.toFloat() / bitmap.height)
+                        )
                         targetWidth = (bitmap.width * scale).roundToInt().coerceAtLeast(1)
                         targetHeight = (bitmap.height * scale).roundToInt().coerceAtLeast(1)
                     }
@@ -98,7 +104,6 @@ object ImageProcessor {
                     }
                 }
 
-                // 4. Format & Transparency handling
                 val format = when (settings.outputFormat) {
                     ImageOutputFormat.JPEG -> Bitmap.CompressFormat.JPEG
                     ImageOutputFormat.PNG -> Bitmap.CompressFormat.PNG
@@ -114,14 +119,13 @@ object ImageProcessor {
                     bitmap = opaqueBitmap
                 }
 
-                // 5. Compression Logic
                 var processedBytes: ByteArray
                 var status = ProcessingStatus.SUCCESS
-                val requestedMaxBytes = settings.targetSizeKb * 1024L
-                val maxAllowedBytes = minOf(requestedMaxBytes, if (image.sizeBytes > 0) image.sizeBytes else requestedMaxBytes)
+
+                // YOUR RULE: Never inflate. Cap target at original size.
+                val maxAllowedBytes = minOf(requestedMaxBytes, image.sizeBytes)
 
                 if (settings.compressionMode == CompressionMode.TARGET_SIZE && format != Bitmap.CompressFormat.PNG) {
-                    // Binary Search for JPEG/WEBP
                     var low = 5
                     var high = 100
                     var bestBytes: ByteArray? = null
@@ -129,8 +133,7 @@ object ImageProcessor {
                     while (low <= high) {
                         val mid = (low + high) / 2
                         val testStream = ByteArrayOutputStream()
-                        val success = bitmap.compress(format, mid, testStream)
-                        if (!success) throw IOException("Compression failed at quality $mid")
+                        if (!bitmap.compress(format, mid, testStream)) throw IOException("Compression failed")
 
                         val size = testStream.size()
                         if (size <= maxAllowedBytes) {
@@ -141,27 +144,22 @@ object ImageProcessor {
                         }
                     }
 
-                    // If even 5% is too big, we output it but flag the status
                     if (bestBytes == null) {
                         val fallbackStream = ByteArrayOutputStream()
-                        if (!bitmap.compress(format, 5, fallbackStream)) throw IOException("Compression failed entirely")
+                        if (!bitmap.compress(format, 5, fallbackStream)) throw IOException("Compression failed")
                         bestBytes = fallbackStream.toByteArray()
                         if (bestBytes.size > maxAllowedBytes) status = ProcessingStatus.TARGET_NOT_MET
                     }
                     processedBytes = bestBytes
                 } else {
-                    // PNG or Quality Mode (Standard fixed compression)
                     processedBytes = ByteArrayOutputStream().use { output ->
-                        val success = bitmap.compress(format, settings.quality, output)
-                        if (!success) throw IOException("Image compression failed")
+                        if (!bitmap.compress(format, settings.quality, output)) throw IOException("Compression failed")
                         output.toByteArray()
                     }
                     if (settings.compressionMode == CompressionMode.TARGET_SIZE && processedBytes.size > maxAllowedBytes) {
                         status = ProcessingStatus.TARGET_NOT_MET
                     }
                 }
-
-                if (processedBytes.isEmpty()) throw IOException("Compression produced an empty file")
 
                 Result.success(
                     ProcessingResult(
@@ -176,6 +174,9 @@ object ImageProcessor {
             } finally {
                 if (!bitmap.isRecycled) bitmap.recycle()
             }
+        } catch (e: CancellationException) {
+            // MUST rethrow so the Cancel button actually stops the coroutine
+            throw e
         } catch (e: Exception) {
             Result.failure(e)
         }

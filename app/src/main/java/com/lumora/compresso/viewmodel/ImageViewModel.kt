@@ -8,6 +8,7 @@ import com.lumora.compresso.image.ImageProcessor
 import com.lumora.compresso.model.*
 import com.lumora.compresso.util.getImageMetadata
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -28,20 +29,26 @@ class ImageViewModel : ViewModel() {
     private val _isProcessing = MutableStateFlow(false)
     val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
 
-    // Helper to clear stale results whenever settings or images change
+    private var processingJob: Job? = null
+
     private fun invalidateResults() {
         _results.value = emptyList()
     }
 
     fun addImages(context: Context, uris: List<Uri>) {
         viewModelScope.launch {
+            val currentList = _selectedImages.value
+            val remainingSlots = 10 - currentList.size // MAX 10 IMAGES
+
+            if (remainingSlots <= 0) return@launch
+
             val newImages = withContext(Dispatchers.IO) {
-                uris.mapNotNull { uri ->
-                    if (_selectedImages.value.any { it.uri == uri }) null
+                uris.take(remainingSlots).mapNotNull { uri ->
+                    if (currentList.any { it.uri == uri }) null
                     else getImageMetadata(context, uri)
                 }
             }
-            _selectedImages.value = _selectedImages.value + newImages
+            _selectedImages.value = currentList + newImages
             invalidateResults()
         }
     }
@@ -56,38 +63,18 @@ class ImageViewModel : ViewModel() {
         invalidateResults()
     }
 
-    // --- Settings Updates (All invalidate previous results) ---
-    fun updateCompressionMode(mode: CompressionMode) {
-        _settings.value = _settings.value.copy(compressionMode = mode)
-        invalidateResults()
+    fun updateCompressionMode(mode: CompressionMode) { _settings.value = _settings.value.copy(compressionMode = mode); invalidateResults() }
+    fun updateQuality(quality: Int) { _settings.value = _settings.value.copy(quality = quality); invalidateResults() }
+    fun updateTargetSizeKb(sizeKb: Int) { _settings.value = _settings.value.copy(targetSizeKb = sizeKb); invalidateResults() }
+    fun updateResize(enabled: Boolean, width: Int, height: Int) { _settings.value = _settings.value.copy(resizeEnabled = enabled, targetWidth = width, targetHeight = height); invalidateResults() }
+    fun updatePreserveAspectRatio(preserve: Boolean) { _settings.value = _settings.value.copy(preserveAspectRatio = preserve); invalidateResults() }
+    fun updateOutputFormat(format: ImageOutputFormat) { _settings.value = _settings.value.copy(outputFormat = format); invalidateResults() }
+
+    fun cancelProcessing() {
+        processingJob?.cancel()
+        _isProcessing.value = false
     }
 
-    fun updateQuality(quality: Int) {
-        _settings.value = _settings.value.copy(quality = quality)
-        invalidateResults()
-    }
-
-    fun updateTargetSizeKb(sizeKb: Int) {
-        _settings.value = _settings.value.copy(targetSizeKb = sizeKb)
-        invalidateResults()
-    }
-
-    fun updateResize(enabled: Boolean, width: Int, height: Int) {
-        _settings.value = _settings.value.copy(resizeEnabled = enabled, targetWidth = width, targetHeight = height)
-        invalidateResults()
-    }
-
-    fun updatePreserveAspectRatio(preserve: Boolean) {
-        _settings.value = _settings.value.copy(preserveAspectRatio = preserve)
-        invalidateResults()
-    }
-
-    fun updateOutputFormat(format: ImageOutputFormat) {
-        _settings.value = _settings.value.copy(outputFormat = format)
-        invalidateResults()
-    }
-
-    // --- Processing ---
     fun compressImages(context: Context) {
         val imagesToProcess = _selectedImages.value
         val currentSettings = _settings.value
@@ -95,33 +82,27 @@ class ImageViewModel : ViewModel() {
 
         _isProcessing.value = true
 
-        viewModelScope.launch {
+        processingJob = viewModelScope.launch {
             val newResults = mutableListOf<ProcessingResult>()
-
             try {
                 for (image in imagesToProcess) {
                     val result = ImageProcessor.processImage(context, image, currentSettings)
-
                     if (result.isSuccess) {
                         newResults.add(result.getOrThrow())
                     } else {
-                        // Explicitly capture failures instead of silently dropping them
                         newResults.add(
                             ProcessingResult(
-                                originalImage = image,
-                                compressedSizeBytes = 0L,
-                                compressedWidth = 0,
-                                compressedHeight = 0,
-                                processedBytes = null,
-                                status = ProcessingStatus.FAILED,
+                                originalImage = image, compressedSizeBytes = 0L, compressedWidth = 0, compressedHeight = 0,
+                                processedBytes = null, status = ProcessingStatus.FAILED,
                                 errorMessage = result.exceptionOrNull()?.message ?: "Unknown error"
                             )
                         )
                     }
                 }
                 _results.value = newResults
+            } catch (e: Exception) {
+                // Ignore exceptions caused by cancellation
             } finally {
-                // This guarantees the spinner stops, even if something catastrophic happens
                 _isProcessing.value = false
             }
         }
