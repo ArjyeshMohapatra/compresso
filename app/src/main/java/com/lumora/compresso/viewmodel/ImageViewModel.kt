@@ -7,6 +7,7 @@ import androidx.lifecycle.viewModelScope
 import com.lumora.compresso.image.ImageProcessor
 import com.lumora.compresso.model.*
 import com.lumora.compresso.util.getImageMetadata
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -26,19 +27,21 @@ class ImageViewModel : ViewModel() {
     private val _results = MutableStateFlow<List<ProcessingResult>>(emptyList())
     val results: StateFlow<List<ProcessingResult>> = _results.asStateFlow()
 
-    private val _isProcessing = MutableStateFlow(false)
-    val isProcessing: StateFlow<Boolean> = _isProcessing.asStateFlow()
+    // Using the generic ProcessingState
+    private val _uiState = MutableStateFlow<ProcessingState>(ProcessingState.Idle)
+    val uiState: StateFlow<ProcessingState> = _uiState.asStateFlow()
 
     private var processingJob: Job? = null
 
     private fun invalidateResults() {
         _results.value = emptyList()
+        _uiState.value = ProcessingState.Idle
     }
 
     fun addImages(context: Context, uris: List<Uri>) {
         viewModelScope.launch {
             val currentList = _selectedImages.value
-            val remainingSlots = 10 - currentList.size // MAX 10 IMAGES
+            val remainingSlots = 10 - currentList.size
 
             if (remainingSlots <= 0) return@launch
 
@@ -72,15 +75,19 @@ class ImageViewModel : ViewModel() {
 
     fun cancelProcessing() {
         processingJob?.cancel()
-        _isProcessing.value = false
+        _uiState.value = ProcessingState.Idle
+    }
+
+    fun resetUiState() {
+        _uiState.value = ProcessingState.Idle
     }
 
     fun compressImages(context: Context) {
         val imagesToProcess = _selectedImages.value
         val currentSettings = _settings.value
-        if (imagesToProcess.isEmpty() || _isProcessing.value) return
+        if (imagesToProcess.isEmpty() || _uiState.value is ProcessingState.Processing) return
 
-        _isProcessing.value = true
+        _uiState.value = ProcessingState.Processing
 
         processingJob = viewModelScope.launch {
             val newResults = mutableListOf<ProcessingResult>()
@@ -100,10 +107,11 @@ class ImageViewModel : ViewModel() {
                     }
                 }
                 _results.value = newResults
+                _uiState.value = ProcessingState.Done
+            } catch (e: CancellationException) {
+                _uiState.value = ProcessingState.Idle
             } catch (e: Exception) {
-                // Ignore exceptions caused by cancellation
-            } finally {
-                _isProcessing.value = false
+                _uiState.value = ProcessingState.Error(e.message ?: "An unexpected error occurred")
             }
         }
     }

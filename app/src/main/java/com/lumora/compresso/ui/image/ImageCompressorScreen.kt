@@ -22,8 +22,10 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.lumora.compresso.model.ProcessingState
 import com.lumora.compresso.viewmodel.ImageViewModel
 import com.lumora.compresso.viewmodel.SettingsViewModel
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -31,16 +33,19 @@ fun ImageCompressorScreen(
     viewModel: ImageViewModel = viewModel(),
     settingsViewModel: SettingsViewModel
 ) {
+    val maxImagesSelected = 10
     val context = LocalContext.current
-    var showResults by rememberSaveable { mutableStateOf(false) }
-    var waitForResults by rememberSaveable { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
-    val isProcessing by viewModel.isProcessing.collectAsState()
+    var showResults by rememberSaveable { mutableStateOf(false) }
+    val snackbarHostState = remember { SnackbarHostState() }
+
+    val uiState by viewModel.uiState.collectAsState()
     val images by viewModel.selectedImages.collectAsState()
     val results by viewModel.results.collectAsState()
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.PickMultipleVisualMedia()
+        contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = maxImagesSelected)
     ) { uris ->
         if (uris.isNotEmpty()) viewModel.addImages(context, uris)
     }
@@ -49,24 +54,42 @@ fun ImageCompressorScreen(
         photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
-    LaunchedEffect(isProcessing, waitForResults) {
-        if (waitForResults && !isProcessing) {
-            waitForResults = false
-            showResults = true
+    // Handle state transitions and errors
+    LaunchedEffect(uiState) {
+        when (uiState) {
+            is ProcessingState.Done -> showResults = true
+            is ProcessingState.Error -> {
+                val errorMsg = (uiState as ProcessingState.Error).message
+                snackbarHostState.showSnackbar("Error: $errorMsg")
+                viewModel.resetUiState()
+            }
+            else -> {}
         }
     }
 
+    // System Back Handler for Results
     BackHandler(enabled = showResults) {
         showResults = false
+        viewModel.resetUiState()
+    }
+
+    // System Back Handler for Processing (Cancels processing)
+    BackHandler(enabled = uiState is ProcessingState.Processing) {
+        viewModel.cancelProcessing()
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         topBar = {
             CenterAlignedTopAppBar(
                 title = { Text(if (showResults) "Compression Results" else "Image Compressor") },
                 navigationIcon = {
                     if (showResults) {
-                        IconButton(onClick = { showResults = false }) {
+                        IconButton(onClick = {
+                            showResults = false
+                            viewModel.resetUiState()
+                        }) {
                             Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                         }
                     }
@@ -75,14 +98,13 @@ fun ImageCompressorScreen(
             )
         },
         floatingActionButton = {
-            if (!isProcessing) {
+            if (uiState !is ProcessingState.Processing) {
                 Column(
                     horizontalAlignment = Alignment.End,
                     verticalArrangement = Arrangement.spacedBy(12.dp),
-                    modifier = Modifier.padding(bottom = 100.dp) // Space above NavBar
+                    modifier = Modifier.padding(bottom = 100.dp)
                 ) {
-                    // Add More Button
-                    if (!showResults && images.isNotEmpty() && images.size < 10) {
+                    if (!showResults && images.isNotEmpty() && images.size < maxImagesSelected) {
                         SmallFloatingActionButton(
                             onClick = launchPicker,
                             containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -92,7 +114,6 @@ fun ImageCompressorScreen(
                         }
                     }
 
-                    // Clear All Button
                     if (!showResults && images.isNotEmpty()) {
                         SmallFloatingActionButton(
                             onClick = { viewModel.clearAll() },
@@ -103,19 +124,19 @@ fun ImageCompressorScreen(
                         }
                     }
 
-                    // Compress / Preview Button
                     if (showResults && results.isNotEmpty()) {
                         ExtendedFloatingActionButton(
-                            onClick = { /* Phase 5 */ },
+                            onClick = {
+                                scope.launch {
+                                    snackbarHostState.showSnackbar("Preview screen is coming in Phase 5!")
+                                }
+                            },
                             icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
                             text = { Text("Preview") }
                         )
                     } else if (!showResults && images.isNotEmpty()) {
                         ExtendedFloatingActionButton(
-                            onClick = {
-                                waitForResults = true
-                                viewModel.compressImages(context)
-                            },
+                            onClick = { viewModel.compressImages(context) },
                             icon = { Icon(Icons.Default.PlayArrow, contentDescription = null) },
                             text = { Text("Compress") },
                             containerColor = MaterialTheme.colorScheme.primary,
@@ -129,7 +150,7 @@ fun ImageCompressorScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(top = paddingValues.calculateTopPadding())
+                .padding(paddingValues)
         ) {
             if (showResults) {
                 ImageResultsScreen(viewModel)
@@ -137,12 +158,12 @@ fun ImageCompressorScreen(
                 ImageConfigScreen(
                     viewModel = viewModel,
                     settingsViewModel = settingsViewModel,
-                    onSelectImagesClick = launchPicker // <-- Pass the click action down
+                    onSelectImagesClick = launchPicker
                 )
             }
 
             // Full-Screen Loading Overlay
-            if (isProcessing) {
+            if (uiState is ProcessingState.Processing) {
                 Box(
                     modifier = Modifier
                         .fillMaxSize()
@@ -157,24 +178,17 @@ fun ImageCompressorScreen(
                         ) {
                             CircularProgressIndicator(modifier = Modifier.size(48.dp))
                             Spacer(Modifier.height(16.dp))
-                            Text("Compressing Images...", style = MaterialTheme.typography.titleMedium)
-                            Spacer(Modifier.height(4.dp))
-                            Text("Please wait", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                        }
-                    }
+                            Text("Processing...", style = MaterialTheme.typography.titleMedium)
+                            Spacer(Modifier.height(24.dp))
 
-                    Button(
-                        onClick = {
-                            viewModel.cancelProcessing()
-                            waitForResults = false
-                        },
-                        modifier = Modifier
-                            .align(Alignment.BottomCenter)
-                            .padding(bottom = 48.dp)
-                            .fillMaxWidth(0.6f),
-                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
-                    ) {
-                        Text("Cancel Processing")
+                            // RESTORED CANCEL BUTTON
+                            Button(
+                                onClick = { viewModel.cancelProcessing() },
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                            ) {
+                                Text("Cancel")
+                            }
+                        }
                     }
                 }
             }
