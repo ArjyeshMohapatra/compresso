@@ -7,12 +7,11 @@ import androidx.lifecycle.viewModelScope
 import com.lumora.compresso.image.ImageProcessor
 import com.lumora.compresso.model.*
 import com.lumora.compresso.util.getImageMetadata
+import com.lumora.compresso.util.StorageManager
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.*
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -27,9 +26,14 @@ class ImageViewModel : ViewModel() {
     private val _results = MutableStateFlow<List<ProcessingResult>>(emptyList())
     val results: StateFlow<List<ProcessingResult>> = _results.asStateFlow()
 
-    // Using the generic ProcessingState
     private val _uiState = MutableStateFlow<ProcessingState>(ProcessingState.Idle)
     val uiState: StateFlow<ProcessingState> = _uiState.asStateFlow()
+
+    private val _isSaving = MutableStateFlow(false)
+    val isSaving: StateFlow<Boolean> = _isSaving.asStateFlow()
+
+    private val _saveMessage = MutableSharedFlow<String>()
+    val saveMessage = _saveMessage.asSharedFlow()
 
     private var processingJob: Job? = null
 
@@ -42,7 +46,6 @@ class ImageViewModel : ViewModel() {
         viewModelScope.launch {
             val currentList = _selectedImages.value
             val remainingSlots = 10 - currentList.size
-
             if (remainingSlots <= 0) return@launch
 
             val newImages = withContext(Dispatchers.IO) {
@@ -80,6 +83,50 @@ class ImageViewModel : ViewModel() {
 
     fun resetUiState() {
         _uiState.value = ProcessingState.Idle
+    }
+
+    fun saveResults(context: Context, folderUri: Uri, outputFormat: ImageOutputFormat) {
+        if (_isSaving.value) return
+        _isSaving.value = true
+
+        viewModelScope.launch {
+            var successCount = 0
+            val currentSettings = _settings.value
+
+            try {
+                // Move SAF disk I/O to IO thread
+                withContext(Dispatchers.IO) {
+                    for (result in _results.value) {
+                        if (result.status == ProcessingStatus.FAILED || result.status == ProcessingStatus.SKIPPED) continue
+
+                        val originalSize = result.originalImage.sizeBytes
+                        if (originalSize <= 0) continue // Prevent NaN
+
+                        val savedBytes = originalSize - result.compressedSizeBytes
+                        if (savedBytes <= 0) continue // Prevent inflation saves
+
+                        // Only enforce the 1% veto if the user didn't ask to resize
+                        if (!currentSettings.resizeEnabled) {
+                            val percentSaved = (savedBytes.toFloat() / originalSize) * 100
+                            if (percentSaved < 1.0f) continue
+                        }
+
+                        if (result.processedBytes != null) {
+                            val saveResult = StorageManager.saveCompressedImage(context, folderUri, result, outputFormat)
+                            if (saveResult.isSuccess) successCount++
+                        }
+                    }
+                }
+
+                // Emit result to UI thread
+                _saveMessage.emit(
+                    if (successCount == 0) "No files saved. Images were skipped, failed, or already optimal."
+                    else "Saved $successCount compressed file(s)."
+                )
+            } finally {
+                _isSaving.value = false
+            }
+        }
     }
 
     fun compressImages(context: Context) {

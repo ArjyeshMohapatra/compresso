@@ -12,6 +12,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Save
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -23,6 +24,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lumora.compresso.model.ProcessingState
+import com.lumora.compresso.util.StorageManager
 import com.lumora.compresso.viewmodel.ImageViewModel
 import com.lumora.compresso.viewmodel.SettingsViewModel
 import kotlinx.coroutines.launch
@@ -43,6 +45,18 @@ fun ImageCompressorScreen(
     val uiState by viewModel.uiState.collectAsState()
     val images by viewModel.selectedImages.collectAsState()
     val results by viewModel.results.collectAsState()
+    val settings by viewModel.settings.collectAsState()
+    val saveFolderUri by settingsViewModel.saveFolderUri.collectAsState()
+    val isSaving by viewModel.isSaving.collectAsState()
+
+    var pendingSave by remember { mutableStateOf(false) }
+
+    // Collect save events from ViewModel
+    LaunchedEffect(Unit) {
+        viewModel.saveMessage.collect { msg ->
+            snackbarHostState.showSnackbar(msg)
+        }
+    }
 
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickMultipleVisualMedia(maxItems = maxImagesSelected)
@@ -50,11 +64,24 @@ fun ImageCompressorScreen(
         if (uris.isNotEmpty()) viewModel.addImages(context, uris)
     }
 
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            StorageManager.takePersistablePermission(context, uri)
+            settingsViewModel.updateSaveFolder(uri)
+
+            if (pendingSave) {
+                pendingSave = false
+                viewModel.saveResults(context, uri, settings.outputFormat)
+            }
+        }
+    }
+
     val launchPicker = {
         photoPickerLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
     }
 
-    // Handle state transitions and errors
     LaunchedEffect(uiState) {
         when (uiState) {
             is ProcessingState.Done -> showResults = true
@@ -67,13 +94,11 @@ fun ImageCompressorScreen(
         }
     }
 
-    // System Back Handler for Results
     BackHandler(enabled = showResults) {
         showResults = false
         viewModel.resetUiState()
     }
 
-    // System Back Handler for Processing (Cancels processing)
     BackHandler(enabled = uiState is ProcessingState.Processing) {
         viewModel.cancelProcessing()
     }
@@ -127,6 +152,24 @@ fun ImageCompressorScreen(
                     if (showResults && results.isNotEmpty()) {
                         ExtendedFloatingActionButton(
                             onClick = {
+                                if (saveFolderUri == null) {
+                                    pendingSave = true
+                                    folderPickerLauncher.launch(null)
+                                } else {
+                                    viewModel.saveResults(context, saveFolderUri!!, settings.outputFormat)
+                                }
+                            },
+                            // Disable while saving to prevent concurrency
+                            icon = {
+                                if (isSaving) CircularProgressIndicator(modifier = Modifier.size(24.dp), color = MaterialTheme.colorScheme.onPrimary)
+                                else Icon(Icons.Default.Save, contentDescription = null)
+                            },
+                            text = { Text(if (isSaving) "Saving..." else "Save") },
+                            expanded = !isSaving
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        ExtendedFloatingActionButton(
+                            onClick = {
                                 scope.launch {
                                     snackbarHostState.showSnackbar("Preview screen is coming in Phase 5!")
                                 }
@@ -162,7 +205,6 @@ fun ImageCompressorScreen(
                 )
             }
 
-            // Full-Screen Loading Overlay
             if (uiState is ProcessingState.Processing) {
                 Box(
                     modifier = Modifier
@@ -180,8 +222,6 @@ fun ImageCompressorScreen(
                             Spacer(Modifier.height(16.dp))
                             Text("Processing...", style = MaterialTheme.typography.titleMedium)
                             Spacer(Modifier.height(24.dp))
-
-                            // RESTORED CANCEL BUTTON
                             Button(
                                 onClick = { viewModel.cancelProcessing() },
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)

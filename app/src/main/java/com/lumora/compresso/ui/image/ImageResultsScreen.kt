@@ -13,12 +13,14 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import com.lumora.compresso.model.ImageOutputFormat
 import com.lumora.compresso.model.ProcessingStatus
 import com.lumora.compresso.viewmodel.ImageViewModel
 
 @Composable
 fun ImageResultsScreen(viewModel: ImageViewModel) {
     val results by viewModel.results.collectAsState()
+    val settings by viewModel.settings.collectAsState()
 
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -27,10 +29,24 @@ fun ImageResultsScreen(viewModel: ImageViewModel) {
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
-                contentPadding = PaddingValues(top = 8.dp, bottom = 80.dp)
+                contentPadding = PaddingValues(top = 8.dp, bottom = 200.dp)
             ) {
                 items(results, key = { it.originalImage.uri.toString() }) { result ->
                     val image = result.originalImage
+
+                    // FIX: Match the exact extension StorageManager uses
+                    val displayName = if (result.status == ProcessingStatus.SUCCESS) {
+                        val baseName = image.name.substringBeforeLast(".")
+                        val newExt = when (settings.outputFormat) {
+                            ImageOutputFormat.JPEG -> "jpg"
+                            ImageOutputFormat.PNG -> "png"
+                            ImageOutputFormat.WEBP -> "webp"
+                        }
+                        "$baseName.$newExt"
+                    } else {
+                        image.name
+                    }
+
                     Card(modifier = Modifier.fillMaxWidth()) {
                         Row(modifier = Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             AsyncImage(
@@ -39,12 +55,12 @@ fun ImageResultsScreen(viewModel: ImageViewModel) {
                             )
                             Spacer(Modifier.width(12.dp))
                             Column(modifier = Modifier.weight(1f)) {
-                                Text(image.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(displayName, maxLines = 1, overflow = TextOverflow.Ellipsis)
 
                                 when (result.status) {
                                     ProcessingStatus.SKIPPED -> {
                                         Text(
-                                            text = "Skipped • ${image.getFormattedSize()} (Under Target)",
+                                            text = result.errorMessage ?: "Unchanged • ${image.getFormattedSize()} (Already optimal)",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.tertiary
                                         )
@@ -58,20 +74,30 @@ fun ImageResultsScreen(viewModel: ImageViewModel) {
                                     }
                                     ProcessingStatus.TARGET_NOT_MET -> {
                                         Text(
-                                            text = "Target not met • ${result.compressedSizeBytes / 1024} KB",
+                                            // FIX: Show the exact failure reason from the Processor
+                                            text = result.errorMessage ?: "Target not met",
                                             style = MaterialTheme.typography.bodySmall,
                                             color = MaterialTheme.colorScheme.error
                                         )
                                     }
                                     ProcessingStatus.SUCCESS -> {
-                                        val savedPercent = if (image.sizeBytes > 0) {
-                                            ((image.sizeBytes - result.compressedSizeBytes).toFloat() / image.sizeBytes * 100).toInt()
+                                        val diffBytes = result.compressedSizeBytes - image.sizeBytes
+                                        val diffPercent = if (image.sizeBytes > 0) {
+                                            (diffBytes.toFloat() / image.sizeBytes * 100).toInt()
                                         } else 0
 
+                                        val diffText = when {
+                                            diffPercent == 0 -> "(0%)"
+                                            diffPercent > 0 -> "(+${diffPercent}%)"
+                                            else -> "(${diffPercent}%)"
+                                        }
+
+                                        val color = if (diffPercent >= 0) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary
+
                                         Text(
-                                            text = "${image.getFormattedSize()} ➔ ${result.compressedSizeBytes / 1024} KB (-$savedPercent%)",
+                                            text = "${image.getFormattedSize()} ➔ ${result.compressedSizeBytes / 1024} KB $diffText",
                                             style = MaterialTheme.typography.bodySmall,
-                                            color = MaterialTheme.colorScheme.primary
+                                            color = color
                                         )
                                     }
                                 }

@@ -20,7 +20,6 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
 import com.lumora.compresso.ui.image.ImageCompressorScreen
 import com.lumora.compresso.ui.pdf.PdfCompressorScreen
 import com.lumora.compresso.ui.settings.SettingsScreen
@@ -35,15 +34,12 @@ enum class Section(val label: String, val icon: ImageVector) {
 
 @Composable
 fun CompressoApp(settingsViewModel: SettingsViewModel) {
+    // 1. PagerState manages the current page smoothly
     val pagerState = rememberPagerState(pageCount = { Section.entries.size })
     val scope = rememberCoroutineScope()
 
-    var currentSection by rememberSaveable { mutableStateOf(Section.Image) }
-
-    // Sync Pager swipe to Nav Bar
-    LaunchedEffect(pagerState.currentPage) {
-        currentSection = Section.entries[pagerState.currentPage]
-    }
+    // Sync the bottom nav state with the pager
+    val currentSection = Section.entries[pagerState.currentPage]
 
     Scaffold(
         bottomBar = {
@@ -63,13 +59,12 @@ fun CompressoApp(settingsViewModel: SettingsViewModel) {
                         containerColor = Color.DarkGray,
                         tonalElevation = 0.dp
                     ) {
-                        Section.entries.forEach { section ->
+                        Section.entries.forEachIndexed { index, section ->
                             NavigationBarItem(
                                 selected = currentSection == section,
                                 onClick = {
-                                    // Sync Nav Bar click to Pager
-                                    currentSection = section
-                                    scope.launch { pagerState.animateScrollToPage(section.ordinal) }
+                                    // Smoothly animate the pager to the selected tab
+                                    scope.launch { pagerState.animateScrollToPage(index) }
                                 },
                                 icon = { Icon(section.icon, contentDescription = section.label) },
                                 label = { Text(section.label) }
@@ -83,7 +78,9 @@ fun CompressoApp(settingsViewModel: SettingsViewModel) {
         HorizontalPager(
             state = pagerState,
             modifier = Modifier.padding(top = innerPadding.calculateTopPadding()),
-            // Ensure swiping on child elements like SwipeToDismissBox doesn't conflict
+            // FIX 1: Pre-compose adjacent pages to make swiping buttery smooth
+            beyondViewportPageCount = 1,
+            // FIX 2: Allow vertical scrolling to work perfectly inside the pages
             userScrollEnabled = true
         ) { page ->
             when (Section.entries[page]) {

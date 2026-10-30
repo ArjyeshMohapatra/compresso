@@ -10,6 +10,7 @@ import com.lumora.compresso.model.*
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.IOException
 import kotlin.math.min
@@ -34,7 +35,6 @@ object ImageProcessor {
             val resolver = context.contentResolver
             val requestedMaxBytes = settings.targetSizeKb * 1024L
 
-            // Read bytes immediately to avoid any metadata inaccuracies
             val originalBytes = resolver.openInputStream(image.uri)?.use { it.readBytes() }
                 ?: throw IOException("Cannot read original image")
 
@@ -46,10 +46,11 @@ object ImageProcessor {
                 ImageOutputFormat.WEBP -> mime == "image/webp" || name.endsWith(".webp")
             }
 
-            // FIX 1: SKIP IF ALREADY SMALL ENOUGH
-            if (settings.compressionMode == CompressionMode.TARGET_SIZE &&
-                !settings.resizeEnabled && isSameFormat &&
-                originalBytes.size.toLong() <= requestedMaxBytes) {
+            val isSourceJpeg = mime == "image/jpeg" || mime == "image/jpg" || name.endsWith(".jpg") || name.endsWith(".jpeg")
+
+            // FIX: Only skip JPEG to PNG if the user is in TARGET_SIZE mode.
+            if (isSourceJpeg && settings.outputFormat == ImageOutputFormat.PNG &&
+                !settings.resizeEnabled && settings.compressionMode == CompressionMode.TARGET_SIZE) {
 
                 return@withContext Result.success(
                     ProcessingResult(
@@ -58,29 +59,43 @@ object ImageProcessor {
                         compressedWidth = image.width,
                         compressedHeight = image.height,
                         processedBytes = originalBytes,
-                        status = ProcessingStatus.SKIPPED
+                        status = ProcessingStatus.SKIPPED,
+                        errorMessage = "Skipped: Converting JPEG to PNG increases file size."
                     )
                 )
             }
 
-            // FIX 2: EXPLICITLY HANDLE PNG IN TARGET SIZE MODE
-            if (settings.compressionMode == CompressionMode.TARGET_SIZE && settings.outputFormat == ImageOutputFormat.PNG) {
-                return@withContext Result.success(
-                    ProcessingResult(
-                        originalImage = image,
-                        compressedSizeBytes = originalBytes.size.toLong(),
-                        compressedWidth = image.width,
-                        compressedHeight = image.height,
-                        processedBytes = originalBytes,
-                        status = ProcessingStatus.TARGET_NOT_MET,
-                        errorMessage = "PNG is lossless. Target size cannot be met without resizing."
+            // Early skip / validation for same-format files in target size mode
+            if (settings.compressionMode == CompressionMode.TARGET_SIZE && !settings.resizeEnabled && isSameFormat) {
+                if (originalBytes.size.toLong() <= requestedMaxBytes) {
+                    return@withContext Result.success(
+                        ProcessingResult(
+                            originalImage = image,
+                            compressedSizeBytes = originalBytes.size.toLong(),
+                            compressedWidth = image.width,
+                            compressedHeight = image.height,
+                            processedBytes = originalBytes,
+                            status = ProcessingStatus.SKIPPED
+                        )
                     )
-                )
+                } else if (settings.outputFormat == ImageOutputFormat.PNG) {
+                    return@withContext Result.success(
+                        ProcessingResult(
+                            originalImage = image,
+                            compressedSizeBytes = originalBytes.size.toLong(),
+                            compressedWidth = image.width,
+                            compressedHeight = image.height,
+                            processedBytes = originalBytes,
+                            status = ProcessingStatus.TARGET_NOT_MET,
+                            errorMessage = "PNG is lossless and cannot meet target size without resizing."
+                        )
+                    )
+                }
             }
 
-            val orientation = resolver.openInputStream(image.uri)?.use { stream ->
+            val orientation = ByteArrayInputStream(originalBytes).use { stream ->
                 ExifInterface(stream).getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
-            } ?: throw IOException("Cannot read image orientation")
+            }
 
             var bitmap = BitmapFactory.decodeByteArray(originalBytes, 0, originalBytes.size)
                 ?: throw IOException("Cannot decode image")
@@ -102,7 +117,6 @@ object ImageProcessor {
                     if (orientedBitmap !== bitmap) { bitmap.recycle(); bitmap = orientedBitmap }
                 }
 
-                // Bounding Box Resize (Never upscale)
                 if (settings.resizeEnabled) {
                     var targetWidth = settings.targetWidth
                     var targetHeight = settings.targetHeight
@@ -138,47 +152,73 @@ object ImageProcessor {
                 var processedBytes: ByteArray
                 var status = ProcessingStatus.SUCCESS
 
-                if (settings.compressionMode == CompressionMode.TARGET_SIZE) {
+                if (settings.compressionMode == CompressionMode.TARGET_SIZE && format != Bitmap.CompressFormat.PNG) {
                     var low = 5
                     var high = 100
                     var bestBytes: ByteArray? = null
+                    var fallbackBytes: ByteArray? = null
+                    val testStream = ByteArrayOutputStream()
 
                     while (low <= high) {
                         val mid = (low + high) / 2
-                        val testStream = ByteArrayOutputStream()
+                        testStream.reset()
                         if (!bitmap.compress(format, mid, testStream)) throw IOException("Compression failed")
 
-                        val size = testStream.size()
-                        if (size <= requestedMaxBytes) {
+                        if (testStream.size() <= requestedMaxBytes) {
                             bestBytes = testStream.toByteArray()
                             low = mid + 1
                         } else {
+                            if (mid == 5 || fallbackBytes == null) {
+                                fallbackBytes = testStream.toByteArray()
+                            }
                             high = mid - 1
                         }
                     }
 
-                    if (bestBytes == null) {
-                        val fallbackStream = ByteArrayOutputStream()
-                        if (!bitmap.compress(format, 5, fallbackStream)) throw IOException("Compression failed")
-                        bestBytes = fallbackStream.toByteArray()
+                    if (bestBytes != null) {
+                        processedBytes = bestBytes
+                    } else {
+                        processedBytes = fallbackBytes ?: testStream.toByteArray()
                         status = ProcessingStatus.TARGET_NOT_MET
                     }
-                    processedBytes = bestBytes
                 } else {
                     processedBytes = ByteArrayOutputStream().use { output ->
                         if (!bitmap.compress(format, settings.quality, output)) throw IOException("Compression failed")
                         output.toByteArray()
                     }
+                    if (settings.compressionMode == CompressionMode.TARGET_SIZE && processedBytes.size > requestedMaxBytes) {
+                        status = ProcessingStatus.TARGET_NOT_MET
+                    }
                 }
+
+                // Anti-inflation (only if we didn't resize)
+                if (!settings.resizeEnabled && isSameFormat && processedBytes.size > originalBytes.size) {
+                    processedBytes = originalBytes
+                    if (status != ProcessingStatus.TARGET_NOT_MET) {
+                        status = ProcessingStatus.SKIPPED
+                    }
+                }
+
+                val errorMessage = if (status == ProcessingStatus.TARGET_NOT_MET) {
+                    if (settings.outputFormat == ImageOutputFormat.PNG) {
+                        "Target size cannot be met for PNG without resizing further."
+                    } else {
+                        "Target size of ${settings.targetSizeKb} KB could not be reached even at minimum quality."
+                    }
+                } else null
+
+                val finalWidth = if (processedBytes === originalBytes) image.width else bitmap.width
+                val finalHeight = if (processedBytes === originalBytes) image.height else bitmap.height
 
                 Result.success(
                     ProcessingResult(
                         originalImage = image,
                         compressedSizeBytes = processedBytes.size.toLong(),
-                        compressedWidth = bitmap.width,
-                        compressedHeight = bitmap.height,
+                        compressedWidth = finalWidth,
+                        compressedHeight = finalHeight,
                         processedBytes = processedBytes,
-                        status = status
+                        status = status,
+                        errorMessage = errorMessage
                     )
                 )
             } finally {
@@ -186,8 +226,8 @@ object ImageProcessor {
             }
         } catch (e: CancellationException) {
             throw e
-        } catch (e: Exception) {
-            Result.failure(e)
+        } catch (t: Throwable) {
+            Result.failure(if (t is Exception) t else Exception("Image processing failed due to memory or system error: ${t.localizedMessage}", t))
         }
     }
 }

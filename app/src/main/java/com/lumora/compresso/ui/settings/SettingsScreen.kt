@@ -1,22 +1,37 @@
 package com.lumora.compresso.ui.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.lumora.compresso.model.SwipeAction
 import com.lumora.compresso.model.ThemeMode
+import com.lumora.compresso.util.StorageManager
 import com.lumora.compresso.viewmodel.SettingsViewModel
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(settingsViewModel: SettingsViewModel) {
+    val context = LocalContext.current
     val leftAction by settingsViewModel.swipeLeftAction.collectAsState()
     val rightAction by settingsViewModel.swipeRightAction.collectAsState()
     val themeMode by settingsViewModel.themeMode.collectAsState()
+    val saveFolderUri by settingsViewModel.saveFolderUri.collectAsState()
+
+    val folderPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            StorageManager.takePersistablePermission(context, uri)
+            settingsViewModel.updateSaveFolder(uri)
+        }
+    }
 
     Scaffold(
         topBar = {
@@ -37,7 +52,6 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
         ) {
             // APPEARANCE SECTION
             Text("Appearance", style = MaterialTheme.typography.titleMedium)
-
             SettingsDropdown(
                 label = "App Theme",
                 currentValue = themeMode.label,
@@ -50,9 +64,27 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
 
             Spacer(Modifier.height(8.dp))
 
+            // STORAGE SECTION
+            Text("Storage", style = MaterialTheme.typography.titleMedium)
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                onClick = { folderPickerLauncher.launch(null) } // Launch folder picker
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text("Default Save Folder", style = MaterialTheme.typography.bodyLarge)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        text = StorageManager.getFolderName(context, saveFolderUri),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
             // GESTURES SECTION
             Text("Gestures", style = MaterialTheme.typography.titleMedium)
-
             SettingsDropdown(
                 label = "Swipe Left Action",
                 currentValue = leftAction.name,
@@ -62,7 +94,6 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
                     if (selectedAction != null) settingsViewModel.updateSwipeLeft(selectedAction)
                 }
             )
-
             SettingsDropdown(
                 label = "Swipe Right Action",
                 currentValue = rightAction.name,
@@ -72,15 +103,6 @@ fun SettingsScreen(settingsViewModel: SettingsViewModel) {
                     if (selectedAction != null) settingsViewModel.updateSwipeRight(selectedAction)
                 }
             )
-
-            Spacer(Modifier.height(8.dp))
-
-            // DEFAULTS SECTION
-            Text("Defaults", style = MaterialTheme.typography.titleMedium)
-
-            SettingsRow("Default save folder", "Not set")
-            SettingsRow("Default image format", "JPEG")
-            SettingsRow("Default compression quality", "80%")
         }
     }
 }
@@ -94,25 +116,16 @@ fun SettingsDropdown(
     onValueSelected: (String) -> Unit
 ) {
     var expanded by remember { mutableStateOf(false) }
-
-    ExposedDropdownMenuBox(
-        expanded = expanded,
-        onExpandedChange = { expanded = it }
-    ) {
+    ExposedDropdownMenuBox(expanded = expanded, onExpandedChange = { expanded = it }) {
         OutlinedTextField(
             value = currentValue,
             onValueChange = {},
             readOnly = true,
             label = { Text(label) },
             trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = expanded) },
-            modifier = Modifier
-                .menuAnchor()
-                .fillMaxWidth()
+            modifier = Modifier.menuAnchor().fillMaxWidth()
         )
-        ExposedDropdownMenu(
-            expanded = expanded,
-            onDismissRequest = { expanded = false }
-        ) {
+        ExposedDropdownMenu(expanded = expanded, onDismissRequest = { expanded = false }) {
             options.forEach { option ->
                 DropdownMenuItem(
                     text = { Text(option) },
@@ -122,21 +135,6 @@ fun SettingsDropdown(
                     }
                 )
             }
-        }
-    }
-}
-
-@Composable
-private fun SettingsRow(title: String, value: String) {
-    Card(modifier = Modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(title)
-            Text(value, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
 }

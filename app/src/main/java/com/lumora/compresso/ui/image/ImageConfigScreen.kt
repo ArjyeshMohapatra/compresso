@@ -5,6 +5,7 @@ import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.animate
 import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.Orientation
 import androidx.compose.foundation.gestures.draggable
@@ -27,7 +28,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -35,6 +35,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import coil.compose.AsyncImage
+import coil.request.ImageRequest
+import androidx.compose.ui.platform.LocalContext
 import com.lumora.compresso.model.CompressionMode
 import com.lumora.compresso.model.ImageOutputFormat
 import com.lumora.compresso.model.SwipeAction
@@ -52,11 +54,11 @@ fun ImageConfigScreen(
     settingsViewModel: SettingsViewModel,
     onSelectImagesClick: () -> Unit
 ) {
+    val context = LocalContext.current
     val images by viewModel.selectedImages.collectAsState()
     val settings by viewModel.settings.collectAsState()
     val leftAction by settingsViewModel.swipeLeftAction.collectAsState()
     val rightAction by settingsViewModel.swipeRightAction.collectAsState()
-    val snackbarHostState = remember { SnackbarHostState() }
 
     var widthText by remember { mutableStateOf(if (settings.targetWidth > 0) settings.targetWidth.toString() else "") }
     var heightText by remember { mutableStateOf(if (settings.targetHeight > 0) settings.targetHeight.toString() else "") }
@@ -64,28 +66,15 @@ fun ImageConfigScreen(
 
     var isConfigExpanded by remember { mutableStateOf(true) }
 
-    LaunchedEffect(settings.outputFormat, settings.compressionMode) {
-        if (settings.outputFormat == ImageOutputFormat.PNG && settings.compressionMode == CompressionMode.TARGET_SIZE) {
-            viewModel.updateCompressionMode(CompressionMode.QUALITY)
-            snackbarHostState.showSnackbar("PNG is lossless. Switched to Quality mode.")
-        }
-    }
-
-    Box(modifier = Modifier.fillMaxSize()) {
+    // FIX 3: Move imePadding to the parent Box
+    Box(modifier = Modifier.fillMaxSize().imePadding()) {
         if (images.isEmpty()) {
             Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(24.dp),
+                modifier = Modifier.fillMaxSize().padding(24.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Image,
-                    contentDescription = null,
-                    modifier = Modifier.size(72.dp),
-                    tint = MaterialTheme.colorScheme.primary
-                )
+                Icon(Icons.Default.Image, null, Modifier.size(72.dp), tint = MaterialTheme.colorScheme.primary)
                 Spacer(Modifier.height(16.dp))
                 Text("No images selected", style = MaterialTheme.typography.titleMedium)
                 Spacer(Modifier.height(8.dp))
@@ -102,9 +91,7 @@ fun ImageConfigScreen(
             }
         } else {
             LazyColumn(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .imePadding(),
+                modifier = Modifier.fillMaxSize(),
                 verticalArrangement = Arrangement.spacedBy(4.dp),
                 contentPadding = PaddingValues(top = 8.dp, bottom = 200.dp)
             ) {
@@ -118,17 +105,12 @@ fun ImageConfigScreen(
 
                 item {
                     Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp),
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp),
                         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                     ) {
                         Column(modifier = Modifier.padding(bottom = if (isConfigExpanded) 16.dp else 0.dp)) {
                             Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { isConfigExpanded = !isConfigExpanded }
-                                    .padding(16.dp),
+                                modifier = Modifier.fillMaxWidth().clickable { isConfigExpanded = !isConfigExpanded }.padding(16.dp),
                                 horizontalArrangement = Arrangement.SpaceBetween,
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
@@ -142,9 +124,7 @@ fun ImageConfigScreen(
                             AnimatedVisibility(visible = isConfigExpanded) {
                                 Column(modifier = Modifier.padding(horizontal = 16.dp)) {
                                     Row(
-                                        modifier = Modifier
-                                            .fillMaxWidth()
-                                            .padding(bottom = 8.dp),
+                                        modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
                                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                                     ) {
                                         FilterChip(
@@ -157,7 +137,6 @@ fun ImageConfigScreen(
                                             selected = settings.compressionMode == CompressionMode.TARGET_SIZE,
                                             onClick = { viewModel.updateCompressionMode(CompressionMode.TARGET_SIZE) },
                                             label = { Text("By Target Size") },
-                                            enabled = settings.outputFormat != ImageOutputFormat.PNG,
                                             modifier = Modifier.weight(1f)
                                         )
                                     }
@@ -169,6 +148,14 @@ fun ImageConfigScreen(
                                             onValueChange = { viewModel.updateQuality(it.toInt()) },
                                             valueRange = 5f..100f
                                         )
+                                        if (settings.outputFormat == ImageOutputFormat.PNG) {
+                                            Text(
+                                                text = "Note: PNG is lossless. The quality slider only affects JPEG and WebP.",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.tertiary,
+                                                modifier = Modifier.padding(top = 4.dp)
+                                            )
+                                        }
                                     } else {
                                         OutlinedTextField(
                                             value = targetSizeText,
@@ -250,7 +237,7 @@ fun ImageConfigScreen(
                     }
                 }
 
-                // --- MORPHE STYLE SWIPE (ZERO-RECOMPOSITION & SINGLE-STATE) ---
+                // --- OPTIMIZED SWIPE ITEM ---
                 items(images, key = { it.uri.toString() }) { image ->
                     val density = LocalDensity.current
                     val maxSwipePx = with(density) { 110.dp.toPx() }
@@ -263,23 +250,18 @@ fun ImageConfigScreen(
                     val canSwipeLeft = leftAction == SwipeAction.DELETE
                     val canSwipeRight = rightAction == SwipeAction.DELETE
 
-                    // Only recomposes when crossing 0f (changing swipe direction), NOT on every pixel
                     val isSwipingRight by remember(canSwipeRight) {
                         derivedStateOf { offsetX > 0f || (offsetX == 0f && canSwipeRight) }
                     }
 
                     Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 4.dp)
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 4.dp)
                     ) {
-                        // 1. Rounded Red Background (Always in layout tree; hidden in Draw phase at 0f)
+                        // Red Background (Only draw when needed via graphicsLayer)
                         Box(
                             modifier = Modifier
                                 .matchParentSize()
-                                .graphicsLayer {
-                                    alpha = if (offsetX != 0f) 1f else 0f
-                                }
+                                .graphicsLayer { alpha = if (offsetX != 0f) 1f else 0f }
                                 .clip(RoundedCornerShape(16.dp))
                                 .background(MaterialTheme.colorScheme.errorContainer),
                             contentAlignment = if (isSwipingRight) Alignment.CenterStart else Alignment.CenterEnd
@@ -289,22 +271,14 @@ fun ImageConfigScreen(
                                 verticalArrangement = Arrangement.Center,
                                 modifier = Modifier.padding(horizontal = 28.dp)
                             ) {
-                                Icon(
-                                    imageVector = Icons.Default.Delete,
-                                    contentDescription = "Delete",
-                                    tint = MaterialTheme.colorScheme.onErrorContainer
-                                )
+                                Icon(Icons.Default.Delete, "Delete", tint = MaterialTheme.colorScheme.onErrorContainer)
                                 Spacer(Modifier.height(4.dp))
-                                Text(
-                                    text = "Delete",
-                                    color = MaterialTheme.colorScheme.onErrorContainer,
-                                    style = MaterialTheme.typography.labelMedium
-                                )
+                                Text("Delete", color = MaterialTheme.colorScheme.onErrorContainer, style = MaterialTheme.typography.labelMedium)
                             }
                         }
 
-                        // 2. Foreground Card (Reads offsetX only in Layout phase via .offset {})
-                        ElevatedCard(
+                        // FIX 1: Use Card + Row instead of ElevatedCard + ListItem (60fps+ guaranteed)
+                        Card(
                             modifier = Modifier
                                 .offset { IntOffset(offsetX.roundToInt(), 0) }
                                 .fillMaxWidth()
@@ -316,10 +290,7 @@ fun ImageConfigScreen(
                                             maximumValue = if (canSwipeRight) maxSwipePx else 0f
                                         )
                                     },
-                                    onDragStarted = {
-                                        // Stop any ongoing bounce-back if the user grabs the card again
-                                        bounceJob?.cancel()
-                                    },
+                                    onDragStarted = { bounceJob?.cancel() },
                                     onDragStopped = {
                                         if (abs(offsetX) >= triggerThresholdPx) {
                                             viewModel.removeImage(image.uri)
@@ -328,58 +299,46 @@ fun ImageConfigScreen(
                                                 animate(
                                                     initialValue = offsetX,
                                                     targetValue = 0f,
-                                                    animationSpec = spring(
-                                                        dampingRatio = Spring.DampingRatioMediumBouncy,
-                                                        stiffness = Spring.StiffnessLow
-                                                    )
-                                                ) { value, _ ->
-                                                    offsetX = value
-                                                }
+                                                    animationSpec = spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessLow)
+                                                ) { value, _ -> offsetX = value }
                                             }
                                         }
                                     }
                                 ),
                             shape = RoundedCornerShape(16.dp),
-                            colors = CardDefaults.elevatedCardColors(
-                                containerColor = MaterialTheme.colorScheme.surfaceVariant
-                            )
+                            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
                         ) {
-                            ListItem(
-                                leadingContent = {
-                                    AsyncImage(
-                                        model = image.uri,
-                                        contentDescription = null,
-                                        modifier = Modifier
-                                            .size(56.dp)
-                                            .clip(RoundedCornerShape(8.dp)),
-                                        contentScale = ContentScale.Crop
-                                    )
-                                },
-                                headlineContent = {
-                                    Text(image.name, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                                },
-                                supportingContent = {
+                            Row(
+                                modifier = Modifier.padding(12.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // FIX 2: Downsample image in Coil to save memory/CPU
+                                AsyncImage(
+                                    model = ImageRequest.Builder(context)
+                                        .data(image.uri)
+                                        .size(112) // 56.dp ≈ 112px on xhdpi
+                                        .crossfade(true)
+                                        .build(),
+                                    contentDescription = null,
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .clip(RoundedCornerShape(8.dp)),
+                                    contentScale = ContentScale.Crop
+                                )
+                                Spacer(Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(image.name, maxLines = 1, overflow = TextOverflow.Ellipsis, style = MaterialTheme.typography.bodyLarge)
                                     Text(
                                         text = "${image.width} × ${image.height}  •  ${image.getFormattedSize()}",
                                         style = MaterialTheme.typography.bodySmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
-                                },
-                                colors = ListItemDefaults.colors(
-                                    containerColor = Color.Transparent
-                                )
-                            )
+                                }
+                            }
                         }
                     }
                 }
             }
         }
-
-        SnackbarHost(
-            hostState = snackbarHostState,
-            modifier = Modifier
-                .align(Alignment.BottomCenter)
-                .padding(16.dp)
-        )
     }
 }
